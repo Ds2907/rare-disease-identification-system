@@ -10,3 +10,4 @@ numpy
 pandas
 sqlalchemy
 huggingface_hub
+python-3.10.13

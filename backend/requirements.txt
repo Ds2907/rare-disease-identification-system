@@ -3,10 +3,10 @@ uvicorn
 python-multipart
 torch==2.0.1
 torchvision==0.15.2
-transformers
+transformers==4.30.2
 pillow
 scikit-learn
-numpy
+numpy==1.26.4
 pandas
 sqlalchemy
 huggingface_hub

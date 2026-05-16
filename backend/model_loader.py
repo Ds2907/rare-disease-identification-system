@@ -8,7 +8,7 @@ import numpy as np
 import os
 
 # ── Your HuggingFace repo details ──────────────────────────────
-HF_REPO_ID = "https://huggingface.co/soumadhut/rare-disease-models"  # ← update this
+HF_REPO_ID = "soumadhut/rare-disease-models"  # ← update this
 HF_TOKEN   = os.environ.get("HF_TOKEN", None)
 
 

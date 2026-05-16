@@ -2,9 +2,15 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from transformers import AutoModel, AutoTokenizer
+from huggingface_hub import hf_hub_download
 import pickle
 import numpy as np
 import os
+
+# ── Your HuggingFace repo details ──────────────────────────────
+HF_REPO_ID = "https://huggingface.co/soumadhut/rare-disease-models"  # ← update this
+HF_TOKEN   = os.environ.get("HF_TOKEN", None)
+
 
 class MultimodalFusionModel(nn.Module):
     def __init__(self, num_classes,
@@ -38,29 +44,62 @@ class MultimodalFusionModel(nn.Module):
             attention_mask=attention_mask)
         text_feat = text_out.last_hidden_state[:, 0, :]
         text_proj = self.text_proj(text_feat)
-
         img_feat  = self.resnet(images).squeeze(-1).squeeze(-1)
         img_proj  = self.img_proj(img_feat)
-
-        fused  = torch.cat([text_proj, img_proj], dim=1)
+        fused     = torch.cat([text_proj, img_proj], dim=1)
         return self.fusion(fused)
 
 
-def load_models(models_dir="models"):
+def download_models():
+    """Download models from HuggingFace Hub"""
+    os.makedirs("models", exist_ok=True)
+
+    model_path = "models/fusion_model.pt"
+    le_path    = "models/label_encoder.pkl"
+
+    if not os.path.exists(model_path):
+        print("Downloading fusion_model.pt from HuggingFace...")
+        downloaded = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename="fusion_model.pt",
+            token=HF_TOKEN,
+            local_dir="models"
+        )
+        print(f"✓ Model downloaded: {downloaded}")
+    else:
+        print("✓ fusion_model.pt already exists")
+
+    if not os.path.exists(le_path):
+        print("Downloading label_encoder.pkl...")
+        hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename="label_encoder.pkl",
+            token=HF_TOKEN,
+            local_dir="models"
+        )
+        print("✓ label_encoder.pkl downloaded")
+    else:
+        print("✓ label_encoder.pkl already exists")
+
+
+def load_models():
     device = torch.device("cpu")
 
+    # Download from HuggingFace if not present
+    download_models()
+
     # Load checkpoint
-    model_path = os.path.join(models_dir, "fusion_model.pt")
+    model_path = "models/fusion_model.pt"
     torch.serialization.add_safe_globals([np.ndarray])
     checkpoint = torch.load(
         model_path, map_location=device,
         weights_only=False)
 
-    NUM_CLASSES = checkpoint['num_classes']
-    label_remap = checkpoint['label_remap']
+    NUM_CLASSES   = checkpoint['num_classes']
+    label_remap   = checkpoint['label_remap']
     reverse_remap = checkpoint['reverse_remap']
 
-    # Build + load model
+    # Build model
     model = MultimodalFusionModel(NUM_CLASSES)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -70,11 +109,11 @@ def load_models(models_dir="models"):
         "dmis-lab/biobert-base-cased-v1.2")
 
     # Load label encoder
-    le_path = os.path.join(models_dir, "label_encoder.pkl")
-    with open(le_path, "rb") as f:
+    with open("models/label_encoder.pkl", "rb") as f:
         le = pickle.load(f)
 
-    print(f"✓ Models loaded")
-    print(f"  Classes     : {NUM_CLASSES}")
+    print(f"✓ All models loaded")
+    print(f"  Classes : {NUM_CLASSES}")
 
-    return model, tokenizer, le, label_remap, reverse_remap, device
+    return (model, tokenizer, le,
+            label_remap, reverse_remap, device)

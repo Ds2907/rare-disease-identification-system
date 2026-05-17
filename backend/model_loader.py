@@ -86,10 +86,10 @@ def load_models():
     device = torch.device("cpu")
     download_models()
 
-    # PyTorch 2.0.1 compatible loading
     ckpt = torch.load(
         "models/fusion_model.pt",
-        map_location=device
+        map_location=device,
+        weights_only=False
     )
 
     NUM_CLASSES   = ckpt['num_classes']
@@ -97,7 +97,10 @@ def load_models():
     reverse_remap = ckpt['reverse_remap']
 
     model = MultimodalFusionModel(NUM_CLASSES)
-    model.load_state_dict(ckpt['model_state_dict'])
+    model.load_state_dict(
+        ckpt['model_state_dict'],
+        strict=False  # ← fix missing position_ids key
+    )
     model.eval()
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -109,3 +112,4 @@ def load_models():
     print(f"✓ Models loaded | Classes: {NUM_CLASSES}")
     return (model, tokenizer, le,
             label_remap, reverse_remap, device)
+ 

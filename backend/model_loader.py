@@ -84,36 +84,28 @@ def download_models():
 
 def load_models():
     device = torch.device("cpu")
-
-    # Download from HuggingFace if not present
     download_models()
 
-    # Load checkpoint
-    model_path = "models/fusion_model.pt"
-    torch.serialization.add_safe_globals([np.ndarray])
-    checkpoint = torch.load(
-        model_path, map_location=device,
-        weights_only=False)
+    # PyTorch 2.0.1 compatible loading
+    ckpt = torch.load(
+        "models/fusion_model.pt",
+        map_location=device
+    )
 
-    NUM_CLASSES   = checkpoint['num_classes']
-    label_remap   = checkpoint['label_remap']
-    reverse_remap = checkpoint['reverse_remap']
+    NUM_CLASSES   = ckpt['num_classes']
+    label_remap   = ckpt['label_remap']
+    reverse_remap = ckpt['reverse_remap']
 
-    # Build model
     model = MultimodalFusionModel(NUM_CLASSES)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
 
-    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         "dmis-lab/biobert-base-cased-v1.2")
 
-    # Load label encoder
     with open("models/label_encoder.pkl", "rb") as f:
         le = pickle.load(f)
 
-    print(f"✓ All models loaded")
-    print(f"  Classes : {NUM_CLASSES}")
-
+    print(f"✓ Models loaded | Classes: {NUM_CLASSES}")
     return (model, tokenizer, le,
             label_remap, reverse_remap, device)

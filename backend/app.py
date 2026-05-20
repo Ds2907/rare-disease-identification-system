@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+from transformers import AutoTokenizer
 from PIL import Image
 import io
 import uvicorn
@@ -16,8 +17,6 @@ import json
 
 app = FastAPI(
     title="Rare Disease Identification API",
-    description="Predicts Top-K rare diseases from "
-                "symptoms and medical images",
     version="2.0.0"
 )
 
@@ -28,14 +27,13 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Create DB tables on startup
 create_tables()
 
-# Load models
 print("Loading models...")
-model, tokenizer, le, label_remap, \
-    reverse_remap, device = load_models()
-print("✓ Ready")
+(fusion_model, nlp_model, tokenizer, le,
+ label_remap, reverse_remap,
+ nlp_label_remap, nlp_reverse_remap,
+ device) = load_models()
 
 img_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -52,9 +50,13 @@ def root():
         "message" : "Rare Disease Identification API",
         "version" : "2.0",
         "status"  : "running",
+        "models"  : {
+            "fusion" : "BioBERT + ResNet-50 Fusion",
+            "nlp_v2" : "BioBERT V2 (improved)"
+        },
         "endpoints": {
             "/predict"     : "POST — image + symptoms",
-            "/predict/text": "POST — symptoms only",
+            "/predict/text": "POST — symptoms only (NLP V2)",
             "/health"      : "GET  — health check",
             "/analytics"   : "GET  — prediction stats",
             "/history"     : "GET  — prediction history"
@@ -64,7 +66,80 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "model": "loaded"}
+    return {
+        "status"      : "healthy",
+        "fusion_model": "loaded",
+        "nlp_v2_model": "loaded"
+    }
+
+
+@app.post("/predict/text")
+async def predict_text(
+    symptoms : str = Form(...),
+    top_k    : int = Form(default=5),
+    db       : Session = Depends(get_db)
+):
+    """Predict using improved NLP V2 model — symptoms only"""
+    try:
+        symptom_list = [s.strip().lower()
+                        for s in symptoms.split(',')]
+        symptom_text = ' [SEP] '.join(symptom_list)
+
+        enc = tokenizer(
+            symptom_text,
+            max_length=128,
+            truncation=True,
+            padding='max_length',
+            return_tensors='pt'
+        )
+
+        # Use improved NLP V2 model
+        with torch.no_grad():
+            logits = nlp_model(
+                enc['input_ids'].to(device),
+                enc['attention_mask'].to(device)
+            )
+            probs = F.softmax(logits, dim=1)
+            topk  = probs.topk(
+                min(top_k, probs.size(1)), dim=1)
+
+        predictions = []
+        for i in range(topk.indices.size(1)):
+            label_idx  = topk.indices[0][i].item()
+            prob       = topk.values[0][i].item()
+            orig_label = nlp_reverse_remap.get(
+                label_idx, label_idx)
+            try:
+                disease = le.inverse_transform(
+                    [orig_label])[0]
+            except:
+                disease = f"Disease_{orig_label}"
+
+            predictions.append({
+                "rank"       : i + 1,
+                "disease"    : disease,
+                "probability": round(prob * 100, 2),
+                "confidence" : "High"   if prob > 0.5
+                               else "Medium" if prob > 0.2
+                               else "Low",
+                "model_used" : "NLP_V2"
+            })
+
+        save_prediction(db, symptom_list,
+                        predictions,
+                        has_image=False, top_k=top_k)
+
+        return {
+            "status"     : "success",
+            "symptoms"   : symptom_list,
+            "predictions": predictions,
+            "model"      : "BioBERT V2 (improved)",
+            "top_k"      : top_k,
+            "timestamp"  : str(datetime.utcnow())
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/predict")
@@ -74,6 +149,7 @@ async def predict(
     top_k    : int = Form(default=5),
     db       : Session = Depends(get_db)
 ):
+    """Predict using fusion model — image + symptoms"""
     try:
         symptom_list = [s.strip().lower()
                         for s in symptoms.split(',')]
@@ -93,7 +169,7 @@ async def predict(
         img_tensor = img_transform(img).unsqueeze(0)
 
         with torch.no_grad():
-            logits = model(
+            logits = fusion_model(
                 enc['input_ids'].to(device),
                 enc['attention_mask'].to(device),
                 img_tensor.to(device)
@@ -120,10 +196,10 @@ async def predict(
                 "probability": round(prob * 100, 2),
                 "confidence" : "High"   if prob > 0.5
                                else "Medium" if prob > 0.2
-                               else "Low"
+                               else "Low",
+                "model_used" : "Fusion"
             })
 
-        # Save to database
         save_prediction(db, symptom_list,
                         predictions,
                         has_image=True, top_k=top_k)
@@ -132,75 +208,7 @@ async def predict(
             "status"     : "success",
             "symptoms"   : symptom_list,
             "predictions": predictions,
-            "top_k"      : top_k,
-            "timestamp"  : str(datetime.utcnow())
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-@app.post("/predict/text")
-async def predict_text(
-    symptoms : str = Form(...),
-    top_k    : int = Form(default=5),
-    db       : Session = Depends(get_db)
-):
-    try:
-        symptom_list = [s.strip().lower()
-                        for s in symptoms.split(',')]
-        symptom_text = ' [SEP] '.join(symptom_list)
-
-        enc = tokenizer(
-            symptom_text,
-            max_length=128,
-            truncation=True,
-            padding='max_length',
-            return_tensors='pt'
-        )
-
-        blank_img = torch.zeros(1, 3, 224, 224)
-
-        with torch.no_grad():
-            logits = model(
-                enc['input_ids'].to(device),
-                enc['attention_mask'].to(device),
-                blank_img.to(device)
-            )
-            probs = F.softmax(logits, dim=1)
-            topk  = probs.topk(
-                min(top_k, probs.size(1)), dim=1)
-
-        predictions = []
-        for i in range(topk.indices.size(1)):
-            label_idx  = topk.indices[0][i].item()
-            prob       = topk.values[0][i].item()
-            orig_label = reverse_remap.get(
-                label_idx, label_idx)
-            try:
-                disease = le.inverse_transform(
-                    [orig_label])[0]
-            except:
-                disease = f"Disease_{orig_label}"
-
-            predictions.append({
-                "rank"       : i + 1,
-                "disease"    : disease,
-                "probability": round(prob * 100, 2),
-                "confidence" : "High"   if prob > 0.5
-                               else "Medium" if prob > 0.2
-                               else "Low"
-            })
-
-        # Save to database
-        save_prediction(db, symptom_list,
-                        predictions,
-                        has_image=False, top_k=top_k)
-
-        return {
-            "status"     : "success",
-            "symptoms"   : symptom_list,
-            "predictions": predictions,
+            "model"      : "Multimodal Fusion",
             "top_k"      : top_k,
             "timestamp"  : str(datetime.utcnow())
         }
@@ -211,7 +219,6 @@ async def predict_text(
 
 @app.get("/analytics")
 def analytics(db: Session = Depends(get_db)):
-    """Get prediction analytics — for dashboard"""
     try:
         data = get_analytics(db)
         return {"status": "success", "data": data}
@@ -224,7 +231,6 @@ def history(
     limit : int = 20,
     db    : Session = Depends(get_db)
 ):
-    """Get recent prediction history"""
     try:
         records = db.query(PredictionRecord)\
             .order_by(
@@ -255,4 +261,5 @@ def history(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, host="0.0.0.0", port=8000)

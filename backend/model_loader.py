@@ -83,7 +83,8 @@ def download_models():
     files = [
         "fusion_model.pt",
         "label_encoder.pkl",
-        "improved_nlp_v2.pt"
+        "improved_nlp_v2.pt",
+        "cnn_v2_full.pt"
     ]
     for fname in files:
         path = f"models/{fname}"
